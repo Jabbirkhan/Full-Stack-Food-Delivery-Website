@@ -392,7 +392,6 @@ VITE_BACKEND_URL=http://localhost:8004
 ```env
 VITE_BACKEND_URL=http://localhost:8004
 ```
-> ⚠️ Never commit real `.env` files or secret credentials to GitHub.
 ---
 # 🚀 Installation & Setup
 ## 1️⃣ Clone Repository
