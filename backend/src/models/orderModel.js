@@ -34,7 +34,9 @@ const orderSchema = new mongoose.Schema({
     },
     idempotencyKey: {
         type: String,
-        required: true,
+        required: function () {
+            return this.paymentMethod === "stripe";
+        }, // This field is required only for Stripe payments
     },
 },{timestamps:true});
 

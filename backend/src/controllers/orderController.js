@@ -10,8 +10,8 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173"; // Replace with your frontend URL
 
 // global variables
-const currency = 'USD'
-const deliveryCharge = 20
+const currency = "USD";
+const deliveryCharge = 20;
 
 const placeOrder = async (req, res) => {
   try {
@@ -47,35 +47,38 @@ const placeOrder = async (req, res) => {
   }
 };
 
+
 const createStripeSession = async (order) => {
-  const line_items = order.map((item) => {
-      const selectedPrice =
-        item.size === "Half"
-          ? item.price[0]
-          : item.price[item.price.length - 1];
+  const line_items = order.items.map((item) => {
+    const price = Number(item.price);
 
-      return {
-        price_data: {
-          currency,
-          product_data: {
-            name: `${item.name} (${item.size})`,
-          },
-          unit_amount: Math.round(Number(selectedPrice) * 100),
-        },
-        quantity: item.quantity,
-      };
-    });
+    if (!Number.isFinite(price) || price <= 0) {
+      throw new Error(`Invalid price for product: ${item.name}`);
+    }
 
-  line_items.push({
+    return {
       price_data: {
-        currency: currency,
+        currency,
         product_data: {
-          name: "Delivery Charges"
+          name: `${item.name} (${item.size})`,
         },
-        unit_amount: deliveryCharge * 100, // Stripe requires amount in cents
+        unit_amount: Math.round(price * 100),
       },
-      quantity: 1,
-    })
+      quantity: item.quantity,
+    };
+  });
+
+  // Delivery charges
+  line_items.push({
+    price_data: {
+      currency,
+      product_data: {
+        name: "Delivery Charges",
+      },
+      unit_amount: Math.round(deliveryCharge * 100),
+    },
+    quantity: 1,
+  });
 
   return stripe.checkout.sessions.create(
     {
@@ -83,16 +86,16 @@ const createStripeSession = async (order) => {
       line_items,
       success_url: `${frontendUrl}/verify?success=true&orderId=${order._id}`,
       cancel_url: `${frontendUrl}/verify?canceled=true&orderId=${order._id}`,
-      // Metadata for the Checkout Session.
+
       metadata: {
         orderId: order._id.toString(),
-        userId: req.user._id.toString(),
+        userId: order.userId.toString(),
       },
-      // Metadata for the PaymentIntent used by our webhook.
+
       payment_intent_data: {
         metadata: {
           orderId: order._id.toString(),
-          userId: req.user._id.toString(),
+          userId: order.userId.toString(),
         },
       },
     },
@@ -102,17 +105,35 @@ const createStripeSession = async (order) => {
   );
 };
 
+
 const placeStripeOrder = async (req, res) => {
   try {
-    const userId = req.user._id
+    const userId = req.user._id;
     const { items, address, amount, paymentMethod, idempotencyKey } = req.body;
 
-    if (!Array.isArray(items) || !items.length || !address || !amount || !paymentMethod) {
-      return res.status(400).json({ success: false, message: "All fields are required" });
+    if (
+      !Array.isArray(items) ||
+      !items.length ||
+      !address ||
+      !amount ||
+      !paymentMethod
+    ) {
+      return res
+        .status(400)
+        .json({ success: false, message: "All fields are required" });
     }
 
-    if (!idempotencyKey) {
-      return res.status(400).json({ success: false, message: "A valid idempotency UUID is required" });
+    const isValidUUID =
+      typeof idempotencyKey === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        idempotencyKey,
+      );
+
+    if (!isValidUUID) {
+      return res.status(400).json({
+        success: false,
+        message: "A valid idempotency UUID is required",
+      });
     }
 
     const existingOrder = await Order.findOne({
@@ -129,17 +150,46 @@ const placeStripeOrder = async (req, res) => {
     const productData = [];
     for (const item of items) {
       const product = await Product.findById(item._id);
+
       if (!product) {
-        return res.status(404).json({ success: false, message: "Product not found" });
+        return res
+          .status(404)
+          .json({ success: false, message: "Product not found" });
       }
       const quantity = Number(item.quantity);
       if (!Number.isSafeInteger(quantity) || quantity < 1) {
-        return res.status(400).json({ success: false, message: "Invalid product quantity" });
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid product quantity" });
       }
 
-      const price = product.price;
-      if (!Number.isFinite(price) || price < 0) {
-        return res.status(400).json({ success: false, message: "Invalid product price" });
+      // Find the selected size index
+      const sizeIndex = product.sizes.indexOf(item.size);
+
+      // Validate selected size
+      if (sizeIndex === -1) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid product size",
+        });
+      }
+
+      // Convert price string to number
+      const rawPrice = product.price[sizeIndex];
+      const price = Number(rawPrice);
+
+      // Validate price
+      if (
+        rawPrice === null ||
+        rawPrice === undefined ||
+        rawPrice === "" ||
+        !Number.isFinite(price) ||
+        price < 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid product price",
+        });
       }
 
       TotalAmount += price * quantity;
@@ -156,14 +206,14 @@ const placeStripeOrder = async (req, res) => {
     TotalAmount += deliveryCharge;
 
     const orderData = {
-      userId: id,
+      userId,
       items: productData,
       address,
       amount: TotalAmount,
       paymentMethod,
       idempotencyKey,
       date: Date.now(),
-    }
+    };
 
     const order = await Order.create(orderData);
     await order.save();
@@ -171,7 +221,6 @@ const placeStripeOrder = async (req, res) => {
     const session = await createStripeSession(order);
 
     return res.status(200).json({ success: true, session_url: session.url });
-
   } catch (error) {
     if (error.code === 11000 && idempotencyKey) {
       const userId = req.user._id;
@@ -183,7 +232,9 @@ const placeStripeOrder = async (req, res) => {
       if (existingOrder) {
         try {
           const session = await createStripeSession(existingOrder);
-          return res.status(200).json({ success: true, session_url: session.url });
+          return res
+            .status(200)
+            .json({ success: true, session_url: session.url });
         } catch (sessionError) {
           console.error("Stripe session retry failed:", sessionError);
         }
@@ -192,32 +243,36 @@ const placeStripeOrder = async (req, res) => {
 
     res.status(500).json({ success: false, message: error.message });
   }
-}
+};
 
 const handlePaymentIntent = async (paymentIntentId, payment) => {
   const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
 
   const { orderId, userId } = paymentIntent.metadata;
   if (!orderId || !userId) {
-    return res.json({ success: false, message: "Payment metadata is missing" });
+    throw new Error("Payment metadata is missing");
   }
   const order = await Order.findOne({
     _id: orderId,
     userId,
   });
   if (!order) {
-    return res.json({ success: false, message: "Order not found" });
+    throw new Error("Order not found");
   }
   // Never mark an order paid unless Stripe confirms it.
   if (payment && paymentIntent.status !== "succeeded") {
-    return res.json({ success: false, message: "Payment is not successfull" });
+    throw new Error("Payment is not successful");
   }
-  if (payment && (paymentIntent.currency !== currency || paymentIntent.amount_received !== Math.round(order.amount * 100))) {
-    return res.json({ success: false, message: "Payment amount or currency mismatch" });
+  if (
+    payment &&
+    (paymentIntent.currency !== currency ||
+      paymentIntent.amount_received !== Math.round(order.amount * 100))
+  ) {
+    throw new Error("Payment amount or currency mismatch");
   }
   // Never downgrade a paid order.
   if (order.payment) {
-    return;
+    throw new Error("Order is already paid");
   }
   order.payment = payment;
   await order.save();
@@ -231,7 +286,7 @@ const stripeWebhook = async (req, res) => {
     event = stripe.webhooks.constructEvent(
       req.body,
       signature,
-      process.env.STRIPE_WEBHOOK_SECRET
+      process.env.STRIPE_WEBHOOK_SECRET,
     );
   } catch (error) {
     console.error("Invalid Stripe webhook:", error.message);
@@ -268,23 +323,37 @@ const verifyStripeOrder = async (req, res) => {
       userId,
     });
     if (!order) {
-      return res.status(404).json({ success: false, message: "Order not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
     }
 
     if (!order.payment) {
-      return res.status(200).json({ success: false, payment: false, message: "Payment is pending confirmation. Please check again shortly." });
+      return res
+        .status(200)
+        .json({
+          success: false,
+          payment: false,
+          message:
+            "Payment is pending confirmation. Please check again shortly.",
+        });
     }
     // Clear the cart only after confirmed payment.
     await User.findByIdAndUpdate(userId, {
       cartData: {},
     });
 
-    return res.status(200).json({ success: true, payment: true, message: "Payment successful and order placed" });
-
+    return res
+      .status(200)
+      .json({
+        success: true,
+        payment: true,
+        message: "Payment successful and order placed",
+      });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
-}
+};
 
 const userOrder = async (req, res) => {
   try {
@@ -318,12 +387,10 @@ const updateStatus = async (req, res) => {
     // if satatus is "Delivered" then we will update the payment status to true
     if (status === "Delivered") {
       await Order.findByIdAndUpdate(id, { status, payment: true });
-      return res
-        .status(200)
-        .json({
-          success: true,
-          message: "Order Delivered and Payment Completed",
-        });
+      return res.status(200).json({
+        success: true,
+        message: "Order Delivered and Payment Completed",
+      });
     }
 
     // For other status updates, we just update the status
@@ -345,24 +412,40 @@ const autoStatusUpdate = async () => {
       const timeDiff = currentDate - orderDate;
       const daysDiff = timeDiff / (1000 * 3600 * 24);
       if (daysDiff >= 7 && order.status !== "Delivered") {
-        await Order.findByIdAndUpdate(order._id, { status: "Delivered", payment: true });
+        await Order.findByIdAndUpdate(order._id, {
+          status: "Delivered",
+          payment: true,
+        });
       }
     }
 
     // After delivery, we delete the order after 1 day
     for (const order of orders) {
       if (order.status === "Delivered") {
-        setTimeout(async () => {
-          await Order.findByIdAndDelete(order._id);
-        }, 1 * 24 * 60 * 60 * 1000,
+        setTimeout(
+          async () => {
+            await Order.findByIdAndDelete(order._id);
+          },
+          1 * 24 * 60 * 60 * 1000,
         ); // 1 day in milliseconds
       }
     }
 
-    return res.status(200).json({ success: true, message: "Status updated successfully" });
+    return res
+      .status(200)
+      .json({ success: true, message: "Status updated successfully" });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
 };
 
-export { placeOrder, userOrder, ordersList, updateStatus, autoStatusUpdate, placeStripeOrder, verifyStripeOrder, stripeWebhook };
+export {
+  placeOrder,
+  userOrder,
+  ordersList,
+  updateStatus,
+  autoStatusUpdate,
+  placeStripeOrder,
+  verifyStripeOrder,
+  stripeWebhook,
+};
